@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AI Video Generator</title>
+  <style>
+    body { font-family: Arial; margin: 2em; background: #f9f9f9; }
+    input, textarea, button { width: 100%; margin-top: 0.5em; padding: 0.5em; }
+    #status { margin-top: 1em; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <h1>AI Video Generator</h1>
+
+  <label for="script">Script Text</label>
+  <textarea id="script" rows="6" placeholder="Enter script text..."></textarea>
+
+  <label for="query">Search Query (e.g., nature, technology)</label>
+  <input id="query" placeholder="Search keyword for videos" value="technology" />
+
+  <button onclick="startGeneration()">Generate Video</button>
+
+  <div id="status"></div>
+  <a id="downloadLink" href="#" style="display:none;" download>Download Video</a>
+
+  <script>
+    let taskId = null;
+    let pollInterval = null;
+
+    function startGeneration() {
+      const script = document.getElementById("script").value;
+      const query = document.getElementById("query").value;
+
+      if (script.length < 10) {
+        alert("Script text must be at least 10 characters long.");
+        return;
+      }
+
+      document.getElementById("status").innerText = "Submitting task...";
+      document.getElementById("downloadLink").style.display = "none";
+
+      fetch("http://localhost:8000/generate-video", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script_text: script, search_query: query })
+      })
+      .then(res => res.json())
+      .then(data => {
+        taskId = data.task_id;
+        document.getElementById("status").innerText = "Task started. Polling status...";
+        pollInterval = setInterval(checkStatus, 3000);
+      })
+      .catch(err => {
+        console.error(err);
+        document.getElementById("status").innerText = "Error submitting task.";
+      });
+    }
+
+    function checkStatus() {
+      if (!taskId) return;
+
+      fetch(`http://localhost:8000/task/${taskId}`)
+      .then(res => res.json())
+      .then(data => {
+        document.getElementById("status").innerText = `${data.status.toUpperCase()}: ${data.progress || "Working..."}`;
+
+        if (data.status === "completed") {
+          clearInterval(pollInterval);
+          const link = document.getElementById("downloadLink");
+          link.href = `http://localhost:8000/download/${taskId}`;
+          link.style.display = "block";
+          document.getElementById("status").innerText = "✅ Video ready!";
+        } else if (data.status === "failed") {
+          clearInterval(pollInterval);
+          document.getElementById("status").innerText = "❌ Failed: " + (data.error || "Unknown error");
+        }
+      })
+      .catch(err => {
+        console.error(err);
+        clearInterval(pollInterval);
+        document.getElementById("status").innerText = "Error checking status.";
+      });
+    }
+  </script>
+</body>
+</html>
