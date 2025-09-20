@@ -7,6 +7,7 @@
     body { font-family: Arial; margin: 2em; background: #f9f9f9; }
     input, textarea, button { width: 100%; margin-top: 0.5em; padding: 0.5em; }
     #status { margin-top: 1em; font-weight: bold; }
+    #videoPlayer { width: 100%; max-width: 720px; margin-top: 1em; display: none; }
   </style>
 </head>
 <body>
@@ -21,6 +22,7 @@
   <button onclick="startGeneration()">Generate Video</button>
 
   <div id="status"></div>
+  <video id="videoPlayer" controls></video>
   <a id="downloadLink" href="#" style="display:none;" download>Download Video</a>
 
   <script>
@@ -38,6 +40,7 @@
 
       document.getElementById("status").innerText = "Submitting task...";
       document.getElementById("downloadLink").style.display = "none";
+      document.getElementById("videoPlayer").style.display = "none";
 
       fetch("http://localhost:8000/generate-video", {
         method: "POST",
@@ -66,10 +69,7 @@
 
         if (data.status === "completed") {
           clearInterval(pollInterval);
-          const link = document.getElementById("downloadLink");
-          link.href = `http://localhost:8000/download/${taskId}`;
-          link.style.display = "block";
-          document.getElementById("status").innerText = "✅ Video ready!";
+          loadVideo();
         } else if (data.status === "failed") {
           clearInterval(pollInterval);
           document.getElementById("status").innerText = "❌ Failed: " + (data.error || "Unknown error");
@@ -79,6 +79,28 @@
         console.error(err);
         clearInterval(pollInterval);
         document.getElementById("status").innerText = "Error checking status.";
+      });
+    }
+
+    function loadVideo() {
+      const videoPlayer = document.getElementById("videoPlayer");
+      const downloadLink = document.getElementById("downloadLink");
+      const videoUrl = `http://localhost:8000/download/${taskId}`;
+
+      // Set up video player
+      videoPlayer.src = videoUrl;
+      videoPlayer.style.display = "block";
+      
+      // Set up download link
+      downloadLink.href = videoUrl;
+      downloadLink.style.display = "block";
+      downloadLink.textContent = "Download Video";
+      
+      document.getElementById("status").innerText = "✅ Video ready!";
+
+      // Start playing the video
+      videoPlayer.play().catch(err => {
+        console.error("Error playing video:", err);
       });
     }
   </script>

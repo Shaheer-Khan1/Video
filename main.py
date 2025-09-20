@@ -11,19 +11,27 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_videoclips
+from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_videoclips, AudioFileClip
+import imageio_ffmpeg as ffmpeg
 import numpy as np
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
 # === CONFIGURATION ===
-PEXELS_API_KEY = "zXGa3F1OrMDsDhB9fG9iTm3XszShMefNUcwRuyBahYOLkiR6bHYVgAZY"
-ELEVENLABS_API_KEY = "sk_fb7235fc5a84b0ddeebbb7f19c2ed1bde8f73f6953119d00"
-VOICE_ID = "17bSMslPF4HPyQrGIXAG"
+PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+VOICE_ID = os.getenv("VOICE_ID", "KUJ0dDUYhYz8c1Is7Ct6")
+
+# Validate required environment variables
+if not PEXELS_API_KEY:
+    raise ValueError("PEXELS_API_KEY environment variable is required")
+if not ELEVENLABS_API_KEY:
+    raise ValueError("ELEVENLABS_API_KEY environment variable is required")
+
 MIN_CLIPS = 3
 MAX_CLIPS = 10
 
@@ -37,9 +45,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 class VideoGenerationRequest(BaseModel):
     script_text: str = Field(..., description="The script text for voiceover", min_length=10)
     search_query: str = Field(default="technology", description="Search query for relevant video clips")
-    font_size: int = Field(default=75, ge=40, le=120, description="Font size for captions")
+    font_size: int = Field(default=120, ge=60, le=200, description="Font size for captions")
     voice_id: Optional[str] = Field(default=None, description="ElevenLabs voice ID (optional)")
     voice_settings: Optional[Dict[str, Any]] = Field(default=None, description="Custom voice settings")
+    callback_url: Optional[str] = Field(default=None, description="If provided, the server will POST the generated video to this URL when done.")
 
 class VideoGenerationResponse(BaseModel):
     task_id: str
@@ -70,11 +79,69 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # Change to your domain in production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Ensure bundled ffmpeg/ffprobe are discoverable by subprocess callers (e.g., whisper)
+try:
+    _ffmpeg_exe = ffmpeg.get_ffmpeg_exe()
+    _ffmpeg_dir = os.path.dirname(_ffmpeg_exe)
+    os.environ["IMAGEIO_FFMPEG_EXE"] = _ffmpeg_exe
+    os.environ["PATH"] = f"{_ffmpeg_dir}{os.pathsep}{os.environ.get('PATH','')}"
+    # On Windows, also place a local ffmpeg.exe so tools that call "ffmpeg" by name can find it
+    try:
+        from pathlib import Path as _Path
+        import shutil as _shutil
+        _dst = _Path("ffmpeg.exe")
+        if os.name == "nt" and not _dst.exists() and _ffmpeg_exe.lower().endswith("ffmpeg.exe"):
+            _shutil.copy2(_ffmpeg_exe, str(_dst))
+    except Exception as _copy_e:
+        print(f"Warning: could not place local ffmpeg.exe copy: {_copy_e}")
+    print(f"Using bundled ffmpeg at: {_ffmpeg_exe}")
+except Exception as _e:
+    print(f"Warning: could not set bundled ffmpeg PATH: {_e}")
+
+# === REQUEST LOGGING MIDDLEWARE ===
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    try:
+        method = request.method
+        url = str(request.url)
+        headers = {k: v for k, v in request.headers.items()}
+        query_params = dict(request.query_params)
+
+        # Read body safely and re-inject so downstream can read it
+        body_bytes = await request.body()
+        try:
+            body_preview = body_bytes.decode("utf-8", errors="replace")
+        except Exception:
+            body_preview = str(body_bytes)
+
+        print("=== Incoming Request ===")
+        print(f"Method: {method}")
+        print(f"URL: {url}")
+        if query_params:
+            print(f"Query: {query_params}")
+        print(f"Headers: {headers}")
+        if body_bytes:
+            print(f"Body: {body_preview}")
+        else:
+            print("Body: <empty>")
+        print("========================")
+
+        async def receive_gen():
+            return {"type": "http.request", "body": body_bytes, "more_body": False}
+
+        # Call next with a Request that can still consume the body
+        response = await call_next(Request(request.scope, receive=receive_gen))
+        return response
+    except Exception as e:
+        print(f"[Request Logging Error] {e}")
+        return await call_next(request)
+# === END REQUEST LOGGING MIDDLEWARE ===
 
 # === VIDEO PROCESSING FUNCTIONS ===
 async def search_multiple_pexels_videos(query: str, num_clips: int = 5):
@@ -152,9 +219,10 @@ async def download_multiple_videos(video_data_list, task_id: str):
     return video_paths
 
 def convert_to_shorts(input_path: str, output_path: str):
-    """Convert a single video to shorts format"""
+    """Convert a single video to shorts format using bundled ffmpeg"""
+    ffmpeg_exe = ffmpeg.get_ffmpeg_exe()
     command = [
-        "ffmpeg", "-y", "-i", input_path,
+        ffmpeg_exe, "-y", "-i", input_path,
         "-vf", "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920",
         "-c:a", "copy", output_path
     ]
@@ -267,19 +335,25 @@ async def generate_voiceover(script_text: str, task_id: str, voice_id: str = Non
         raise Exception(error_msg)
 
 def get_audio_duration(audio_path: str) -> float:
-    """Get the duration of an audio file using ffprobe"""
+    """Get the duration of an audio file using bundled ffmpeg"""
     try:
+        ffmpeg_exe = ffmpeg.get_ffmpeg_exe()
         command = [
-            "ffprobe", "-v", "quiet", "-print_format", "json", 
-            "-show_format", audio_path
+            ffmpeg_exe, "-i", audio_path, "-f", "null", "-"
         ]
         result = subprocess.run(command, capture_output=True, text=True, timeout=30)
         
-        if result.returncode != 0:
-            raise Exception(f"ffprobe failed: {result.stderr}")
-            
-        data = json.loads(result.stdout)
-        duration = float(data['format']['duration'])
+        # ffmpeg outputs duration info to stderr
+        stderr_output = result.stderr
+        
+        # Look for duration in format "Duration: HH:MM:SS.ss"
+        import re
+        duration_match = re.search(r'Duration: (\d{2}):(\d{2}):(\d{2})\.(\d{2})', stderr_output)
+        if not duration_match:
+            raise Exception("Could not parse duration from ffmpeg output")
+        
+        hours, minutes, seconds, centiseconds = map(int, duration_match.groups())
+        duration = hours * 3600 + minutes * 60 + seconds + centiseconds / 100.0
         
         if duration <= 0:
             raise Exception("Invalid audio duration")
@@ -368,9 +442,10 @@ async def create_seamless_video_compilation(video_paths, target_duration: float,
         raise Exception(f"Failed to create video compilation: {str(e)}")
 
 def merge_voiceover(video_path: str, audio_path: str, output_path: str):
-    """Merge voiceover with video"""
+    """Merge voiceover with video using bundled ffmpeg"""
+    ffmpeg_exe = ffmpeg.get_ffmpeg_exe()
     command = [
-        "ffmpeg", "-y", "-i", video_path, "-i", audio_path,
+        ffmpeg_exe, "-y", "-i", video_path, "-i", audio_path,
         "-c:v", "libx264", "-c:a", "aac", "-map", "0:v:0", "-map", "1:a:0", 
         "-shortest", output_path
     ]
@@ -414,7 +489,7 @@ def create_smart_word_groups(words):
     
     return groups
 
-def create_caption_clips(words, video_size, font_size=80):
+def create_caption_clips(words, video_size, font_size=120):
     """Create caption clips with smart word grouping"""
     clips = []
     w, h = video_size
@@ -426,7 +501,11 @@ def create_caption_clips(words, video_size, font_size=80):
         try:
             font = ImageFont.truetype("/System/Library/Fonts/Arial.ttf", font_size)
         except:
-            font = ImageFont.load_default()
+            try:
+                # Windows default fonts
+                font = ImageFont.truetype("arial.ttf", font_size)
+            except:
+                font = ImageFont.load_default()
     
     word_groups = create_smart_word_groups(words)
     
@@ -436,22 +515,23 @@ def create_caption_clips(words, video_size, font_size=80):
             draw = ImageDraw.Draw(img)
             
             words_text = [w["word"] for w in word_group]
-            y_position = h - int(h * 0.25) - (font_size // 2)
+            y_position = h - int(h * 0.3) - (font_size // 2)  # Moved up slightly
             
             full_text = " ".join(words_text)
             total_width = draw.textlength(full_text, font=font)
-            start_x = max(10, (w - total_width) // 2)
+            start_x = max(20, (w - total_width) // 2)  # More margin
             current_x = start_x
             
             for i, word_text in enumerate(words_text):
-                color = "yellow" if i == word_idx else "white"
+                color = "#FFD700" if i == word_idx else "#FFFFFF"  # Gold highlight, white text
                 
-                # Add stroke
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
+                # Add thicker stroke for better readability
+                stroke_width = 3
+                for dx in range(-stroke_width, stroke_width + 1):
+                    for dy in range(-stroke_width, stroke_width + 1):
                         if dx != 0 or dy != 0:
                             draw.text((current_x + dx, y_position + dy), word_text, 
-                                     font=font, fill="black")
+                                     font=font, fill="#000000")  # Black stroke
                 
                 draw.text((current_x, y_position), word_text, font=font, fill=color)
                 
@@ -564,16 +644,47 @@ async def process_video_generation(request: VideoGenerationRequest, task_id: str
         # Generate captions
         tasks[task_id]['progress'] = 'Generating captions...'
         try:
-            model = whisper.load_model("base")
-            result = model.transcribe(audio_file, word_timestamps=True)
-            words = extract_words_with_timestamps(result)
+            import whisper
+            import whisper.audio
+            import subprocess
+            
+            # Get the bundled ffmpeg path
+            import imageio_ffmpeg as ffmpeg_lib
+            ffmpeg_exe = ffmpeg_lib.get_ffmpeg_exe()
+            
+            # Store the original run function from whisper.audio module
+            original_run = whisper.audio.run
+            
+            def patched_run(cmd, *args, **kwargs):
+                # Replace 'ffmpeg' with full path in command
+                if isinstance(cmd, list) and len(cmd) > 0 and cmd[0] == 'ffmpeg':
+                    cmd = [ffmpeg_exe] + cmd[1:]
+                elif isinstance(cmd, str) and cmd.startswith('ffmpeg'):
+                    cmd = cmd.replace('ffmpeg', f'"{ffmpeg_exe}"', 1)
+                
+                print(f"Whisper running command: {cmd}")
+                return original_run(cmd, *args, **kwargs)
+            
+            # Patch the run function in whisper.audio module
+            whisper.audio.run = patched_run
+            
+            try:
+                model = whisper.load_model("base")
+                result = model.transcribe(audio_file, word_timestamps=True)
+                words = extract_words_with_timestamps(result)
+                print(f"Successfully transcribed with {len(words)} words")
+            finally:
+                # Restore original run function
+                whisper.audio.run = original_run
+                    
         except Exception as e:
             print(f"Whisper transcription failed: {e}")
-            # Fallback: create video without captions
-            import shutil as sh
-            final_output = OUTPUT_DIR / f"{task_id}_final.mp4"
-            sh.copy2(str(merged_video), str(final_output))
-            words = []
+            print(f"Audio file exists: {os.path.exists(audio_file)}")
+            print(f"Audio file path: {audio_file}")
+            print(f"FFmpeg exe: {ffmpeg_lib.get_ffmpeg_exe()}")
+            import traceback
+            print(f"Full traceback: {traceback.format_exc()}")
+            raise Exception(f"Caption generation failed: {str(e)}")
         
         if words:
             # Add captions
@@ -588,6 +699,26 @@ async def process_video_generation(request: VideoGenerationRequest, task_id: str
         tasks[task_id]['progress'] = 'Video generation completed!'
         tasks[task_id]['output_file'] = final_output
         tasks[task_id]['completed_at'] = datetime.now()
+        
+        # If a callback URL was provided, attempt to deliver the video to it
+        if request.callback_url:
+            try:
+                print(f"Posting completed video to callback URL: {request.callback_url}")
+                with open(final_output, 'rb') as f:
+                    files = {
+                        'video': (f"generated_video_{task_id}.mp4", f, 'video/mp4')
+                    }
+                    data = {
+                        'task_id': task_id,
+                        'status': 'completed',
+                        'duration': str(tasks[task_id].get('duration') or ''),
+                        'message': 'Video generation completed',
+                        'filename': f"generated_video_{task_id}.mp4",
+                    }
+                    # Best-effort delivery with timeout
+                    requests.post(request.callback_url, data=data, files=files, timeout=30)
+            except Exception as callback_error:
+                print(f"Failed to POST video to callback URL: {callback_error}")
         
         # Cleanup temp files
         try:
@@ -761,10 +892,12 @@ async def root():
     }
 
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 8000))
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
-        reload=True,
+        port=port,
+        reload=False,  # Disable reload in production
         log_level="info"
     )

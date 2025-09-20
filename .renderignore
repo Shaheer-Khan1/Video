@@ -1,0 +1,7 @@
+temp_videos/
+output_videos/
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore

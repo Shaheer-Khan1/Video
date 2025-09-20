@@ -1,0 +1,13 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./output_videos:/app/output_videos
+      - ./temp_videos:/app/temp_videos
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped 

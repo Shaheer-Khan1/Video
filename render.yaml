@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: shorts-generator
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10.0
+      - key: ELEVENLABS_API_KEY
+        sync: false  # Set this in Render dashboard
+      - key: PEXELS_API_KEY
+        sync: false  # Set this in Render dashboard
+    disk:
+      name: video-storage
+      mountPath: /opt/render/project/output_videos
+      sizeGB: 10
