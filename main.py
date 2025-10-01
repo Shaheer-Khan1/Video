@@ -1,3 +1,4 @@
+# main.py
 import os
 import requests
 import json
@@ -8,18 +9,22 @@ import asyncio
 import uuid
 import shutil
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import VideoFileClip, CompositeVideoClip, ImageClip, concatenate_videoclips, AudioFileClip
 import imageio_ffmpeg as ffmpeg
 import numpy as np
+import threading
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
+
+from dotenv import load_dotenv
+load_dotenv()
 
 # === CONFIGURATION ===
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
@@ -65,9 +70,23 @@ class TaskStatusResponse(BaseModel):
     duration: Optional[float] = None
     created_at: datetime
     completed_at: Optional[datetime] = None
+    logs: Optional[List[str]] = None
 
 # === GLOBAL TASK STORAGE ===
 tasks: Dict[str, Dict[str, Any]] = {}
+
+def log_task(task_id: str, message: str) -> None:
+    """Append a timestamped log line to the task's log buffer and mirror to progress."""
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"[{ts}] {message}"
+        if task_id in tasks:
+            tasks[task_id].setdefault('logs', []).append(line)
+            # Also mirror last message to progress for quick view
+            tasks[task_id]['progress'] = message
+        print(line)
+    except Exception as e:
+        print(f"[log_task error] {e}")
 
 # === FASTAPI APP ===
 app = FastAPI(
@@ -741,6 +760,18 @@ async def process_video_generation(request: VideoGenerationRequest, task_id: str
 
 # === API ENDPOINTS ===
 
+def start_generation_in_thread(request: VideoGenerationRequest, task_id: str):
+    """Helper: run the async process_video_generation in a separate daemon thread."""
+    def _target():
+        try:
+            # Each thread gets its own event loop via asyncio.run()
+            asyncio.run(process_video_generation(request, task_id))
+        except Exception as e:
+            print(f"[background thread] Unhandled exception for task {task_id}: {e}")
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    return t
+
 @app.post("/generate-video", response_model=VideoGenerationResponse)
 async def generate_video(request: VideoGenerationRequest, background_tasks: BackgroundTasks):
     """Start video generation process"""
@@ -757,8 +788,9 @@ async def generate_video(request: VideoGenerationRequest, background_tasks: Back
         'completed_at': None
     }
     
-    # Start background processing
-    background_tasks.add_task(process_video_generation, request, task_id)
+    # Start background processing in a dedicated thread (avoids blocking the main event loop)
+    # NOTE: we intentionally start our own thread (daemon=True) so the main FastAPI process remains responsive.
+    start_generation_in_thread(request, task_id)
     
     return VideoGenerationResponse(
         task_id=task_id,
@@ -809,12 +841,13 @@ async def get_task_status(task_id: str):
     return TaskStatusResponse(
         task_id=task_id,
         status=task['status'],
-        progress=task['progress'],
-        error=task['error'],
-        output_file=task['output_file'],
-        duration=task['duration'],
+        progress=task.get('progress'),
+        error=task.get('error'),
+        output_file=task.get('output_file'),
+        duration=task.get('duration'),
         created_at=task['created_at'],
-        completed_at=task['completed_at']
+        completed_at=task.get('completed_at'),
+        logs=task.get('logs', [])
     )
 
 @app.get("/download/{task_id}")
