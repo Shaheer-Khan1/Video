@@ -403,83 +403,108 @@ def get_audio_duration(audio_path: str) -> float:
         raise Exception(f"Failed to get audio duration: {str(e)}")
 
 async def create_seamless_video_compilation(video_paths, target_duration: float, task_id: str):
-    """Create a seamless compilation of multiple videos to match target duration"""
+    """Create a seamless compilation using ffmpeg chunking to minimize RAM use."""
     task_dir = TEMP_DIR / task_id
     output_path = task_dir / "compiled_video.mp4"
-    
-    clips = []
-    current_duration = 0
-    video_index = 0
-    
-    # Load all video clips
-    loaded_videos = []
-    for video_data in video_paths:
+    parts_dir = task_dir / "parts"
+    parts_dir.mkdir(parents=True, exist_ok=True)
+
+    import imageio_ffmpeg as ffmpeg_lib
+    ffmpeg_exe = ffmpeg_lib.get_ffmpeg_exe()
+
+    if not video_paths:
+        raise Exception("No input videos provided")
+
+    def ffmpeg_trim(input_path: str, output_path: str, max_duration: float) -> None:
+        # -t trims to duration, stream copy if possible for speed
+        cmd = [
+            ffmpeg_exe, "-y", "-i", input_path,
+            "-t", f"{max_duration:.3f}",
+            "-c", "copy",
+            str(output_path)
+        ]
         try:
-            clip = VideoFileClip(video_data['path'])
-            if clip.duration > 0:  # Ensure valid duration
-                loaded_videos.append(clip)
-            else:
-                clip.close()
-        except Exception as e:
-            print(f"Error loading video {video_data['path']}: {e}")
-            continue
-    
-    if not loaded_videos:
-        raise Exception("No videos could be loaded successfully")
-    
-    # Create compilation
-    while current_duration < target_duration:
-        remaining_time = target_duration - current_duration
-        current_clip = loaded_videos[video_index % len(loaded_videos)]
-        
-        if current_clip.duration <= remaining_time:
-            clip_to_add = current_clip.copy()
-            duration_to_add = current_clip.duration
-        else:
-            clip_to_add = current_clip.subclip(0, remaining_time)
-            duration_to_add = remaining_time
-        
-        clips.append(clip_to_add)
-        current_duration += duration_to_add
-        video_index += 1
-        
-        # Update progress
-        tasks[task_id]['progress'] = f"Compiling video: {current_duration:.1f}/{target_duration:.1f}s"
-    
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as ce:
+            # Fallback to re-encode if stream copy fails (e.g., keyframe cut)
+            cmd = [
+                ffmpeg_exe, "-y", "-i", input_path,
+                "-t", f"{max_duration:.3f}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-c:a", "aac",
+                str(output_path)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    def ffmpeg_concat(inputs: List[str], output_path: str) -> None:
+        # Use concat demuxer
+        list_file = parts_dir / "files.txt"
+        with open(list_file, "w", encoding="utf-8") as f:
+            for p in inputs:
+                f.write(f"file '{p.replace("'","'\\''")}'\n")
+        cmd = [
+            ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+            "-c", "copy", str(output_path)
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError:
+            # Fallback re-encode concat
+            cmd = [
+                ffmpeg_exe, "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28",
+                "-c:a", "aac", str(output_path)
+            ]
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+    # Build temp parts without keeping clips open
+    parts: List[str] = []
+    current_duration = 0.0
+    idx = 0
     try:
-        # Concatenate clips
-        final_video = concatenate_videoclips(clips, method="compose")
-        final_video.write_videofile(
-            str(output_path),
-            codec="libx264",
-            audio_codec="aac",
-            temp_audiofile=str(task_dir / "temp-audio-compile.m4a"),
-            remove_temp=True,
-            verbose=False,
-            logger=None
-        )
-        
-        # Cleanup
-        for clip in clips:
-            clip.close()
-        for video in loaded_videos:
-            video.close()
-        final_video.close()
-        
+        while current_duration < target_duration and video_paths:
+            remaining = target_duration - current_duration
+            src = video_paths[idx % len(video_paths)]
+            src_path = src['path']
+            try:
+                # Probe duration via MoviePy cheaply
+                with VideoFileClip(src_path) as clip:
+                    clip_dur = float(clip.duration or 0)
+                if clip_dur <= 0:
+                    idx += 1
+                    continue
+                use_dur = clip_dur if clip_dur <= remaining else remaining
+                part_path = parts_dir / f"part_{len(parts)+1}.mp4"
+                log_task(task_id, f"Compiling: creating part {len(parts)+1} ({use_dur:.1f}s)…")
+                ffmpeg_trim(src_path, str(part_path), use_dur)
+                parts.append(str(part_path))
+                current_duration += use_dur
+                idx += 1
+                tasks[task_id]['progress'] = f"Compiling: {current_duration:.1f}/{target_duration:.1f}s"
+                free_memory()
+            except Exception as e:
+                print(f"Chunk build error for {src_path}: {e}")
+                idx += 1
+                continue
+
+        if not parts:
+            raise Exception("No parts created for compilation")
+
+        log_task(task_id, f"Compiling: concatenating {len(parts)} parts…")
+        ffmpeg_concat(parts, str(output_path))
+        free_memory()
         return str(output_path)
-    except Exception as e:
-        # Cleanup on error
-        for clip in clips:
-            try:
-                clip.close()
-            except:
-                pass
-        for video in loaded_videos:
-            try:
-                video.close()
-            except:
-                pass
-        raise Exception(f"Failed to create video compilation: {str(e)}")
+    finally:
+        # Cleanup temp parts
+        try:
+            for p in parts:
+                try:
+                    Path(p).unlink(missing_ok=True)
+                except Exception:
+                    pass
+            (parts_dir).rmtree() if hasattr(parts_dir, 'rmtree') else shutil.rmtree(parts_dir, ignore_errors=True)
+        except Exception:
+            pass
 
 def merge_voiceover(video_path: str, audio_path: str, output_path: str):
     """Merge voiceover with video using bundled ffmpeg"""
@@ -709,7 +734,7 @@ async def process_video_generation(request: VideoGenerationRequest, task_id: str
             whisper.audio.run = patched_run
             
             try:
-                model = whisper.load_model("base")
+                model = get_whisper_model(WHISPER_MODEL)
                 result = model.transcribe(audio_file, word_timestamps=True)
                 words = extract_words_with_timestamps(result)
                 print(f"Successfully transcribed with {len(words)} words")
