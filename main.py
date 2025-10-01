@@ -18,6 +18,7 @@ import numpy as np
 import threading
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, UploadFile, File, Request
+import asyncio
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -30,6 +31,8 @@ load_dotenv()
 PEXELS_API_KEY = os.getenv("PEXELS_API_KEY")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 VOICE_ID = os.getenv("VOICE_ID", "KUJ0dDUYhYz8c1Is7Ct6")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "tiny")  # tiny|base|small (tiny uses least memory)
+MAX_CONCURRENT_TASKS = int(os.getenv("MAX_CONCURRENT_TASKS", "1"))  # serialize by default
 
 # Validate required environment variables
 if not PEXELS_API_KEY:
@@ -45,6 +48,9 @@ TEMP_DIR = Path("temp_videos")
 OUTPUT_DIR = Path("output_videos")
 TEMP_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+# Concurrency limiter (keep memory low by processing one job at a time)
+TASK_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 # === PYDANTIC MODELS ===
 class VideoGenerationRequest(BaseModel):
