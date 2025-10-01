@@ -51,7 +51,7 @@
       .then(data => {
         taskId = data.task_id;
         document.getElementById("status").innerText = "Task started. Polling status...";
-        pollInterval = setInterval(checkStatus, 3000);
+        pollInterval = setInterval(checkStatus, 90000);
       })
       .catch(err => {
         console.error(err);
