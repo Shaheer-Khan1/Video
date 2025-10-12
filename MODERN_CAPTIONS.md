@@ -1,17 +1,17 @@
-# 🎬 Modern TikTok-Style Captions
+# 📝 Subtle Natural Captions
 
 ## What's New?
 
-Your video generator now has **modern, captivating captions** like you see on TikTok, Instagram Reels, and YouTube Shorts!
+Your video generator now has **subtle, professional captions** that sync word-by-word with the voice!
 
 ### ✨ Features
 
-1. **Word-by-Word Timing** - Smarter timing based on syllable count (not just equal division)
-2. **Natural Pauses** - Adds delays for punctuation (periods, commas)
-3. **Grouped Words** - Shows 3 words at a time for better readability
-4. **UPPERCASE Style** - Modern, attention-grabbing format
-5. **Bold Yellow Text** - High contrast, easy to read
-6. **Thick Black Outline** - Readable on any background
+1. **Word-by-Word Sync** - Each word appears individually for perfect sync
+2. **Smart Timing** - Syllable-based timing for natural flow
+3. **Natural Pauses** - Adds delays for punctuation (periods, commas)
+4. **Subtle Style** - Small white text, not overwhelming
+5. **No Background** - Clean, transparent captions
+6. **Thin Outline** - Just enough for readability
 7. **Still Lightweight** - Zero additional RAM (no Whisper!)
 
 ---
@@ -34,15 +34,16 @@ Instead of dividing time equally, the system:
 - Smooth transitions between groups
 - Like TikTok/Instagram Reels!
 
-### 3. Modern Styling
+### 3. Subtle Styling
 
 ```
-Font: Arial Black (Bold)
-Size: 40px (large and readable)
-Color: Yellow (#FFFF00)
-Outline: 4px thick black
+Font: Arial (Regular)
+Size: 24px (small, natural)
+Color: White (#FFFFFF)
+Outline: 2px thin black
+Background: None (transparent)
 Position: Bottom center
-Margin: 100px from bottom
+Margin: 30px from bottom
 ```
 
 ---
@@ -54,19 +55,24 @@ Margin: 100px from bottom
 "Welcome to my channel. Today we're exploring AI technology. Let's dive in!"
 ```
 
-### Generated Captions:
+### Generated Captions (Word-by-Word):
 ```
-00:00:00,000 --> 00:00:01,500
-WELCOME TO MY
+00:00:00,000 --> 00:00:00,500
+Welcome
 
-00:00:01,500 --> 00:00:03,200
-CHANNEL TODAY WE'RE
+00:00:00,500 --> 00:00:00,900
+to
 
-00:00:03,200 --> 00:00:05,000
-EXPLORING AI TECHNOLOGY
+00:00:00,900 --> 00:00:01,300
+my
 
-00:00:05,000 --> 00:00:06,500
-LET'S DIVE IN
+00:00:01,300 --> 00:00:01,900
+channel
+
+00:00:01,900 --> 00:00:02,300
+Today
+
+...and so on
 ```
 
 ### Visual Style:
@@ -77,9 +83,10 @@ LET'S DIVE IN
 ║      [Your Video]         ║
 ║                           ║
 ║                           ║
-║     WELCOME TO MY         ║ ← Bold Yellow Text
-║    (thick black outline)  ║
+║                           ║
+║          Welcome          ║ ← Small white text
 ╚═══════════════════════════╝
+   ↑ 30px from bottom
 ```
 
 ---
@@ -90,12 +97,12 @@ LET'S DIVE IN
 
 In `main.py`:
 ```python
-WORDS_PER_CAPTION = 3  # Change to 2, 4, or 5
+WORDS_PER_CAPTION = 1  # Current: One word at a time
 ```
 
-- **2 words**: Very snappy, fast-paced
-- **3 words**: Balanced (default) ✅
-- **4-5 words**: Slower, more readable for complex topics
+- **1 word**: Best sync with voice (default) ✅
+- **2 words**: Faster paced, still good sync
+- **3-4 words**: Sentence-like flow
 
 ### Adjust Caption Style
 

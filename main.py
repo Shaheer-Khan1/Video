@@ -65,12 +65,11 @@ class VideoGenerationRequest(BaseModel):
     callback_url: Optional[str] = Field(default=None, description="If provided, the server will POST the generated video to this URL when done.")
 
 # === CAPTION SETTINGS (Hardcoded) ===
-# Modern TikTok/Instagram Reels style captions
-# Word-by-word with better timing estimation (no Whisper needed!)
+# Subtle, natural captions with word-by-word sync
 # Memory impact: ~0MB (just text processing, no ML models)
 ADD_CAPTIONS = True  # Enabled for Render/Linux deployment
-CAPTION_STYLE = "modern"  # "modern" or "classic"
-WORDS_PER_CAPTION = 3  # Show 3 words at a time for better readability
+WORDS_PER_CAPTION = 1  # Show 1 word at a time for best sync
+CAPTION_FONT_SIZE = 24  # Smaller, more subtle
 
 class VideoGenerationResponse(BaseModel):
     task_id: str
@@ -376,7 +375,7 @@ def estimate_word_timing(text: str, duration: float) -> list:
     return word_data
 
 def create_modern_srt(text: str, duration: float, task_id: str) -> str:
-    """Create modern TikTok-style SRT with word groups for better readability"""
+    """Create word-by-word SRT with natural timing for better sync"""
     task_dir = TEMP_DIR / task_id
     srt_path = task_dir / "captions.srt"
     
@@ -386,7 +385,7 @@ def create_modern_srt(text: str, duration: float, task_id: str) -> str:
     if not word_timings:
         return None
     
-    # Group words for better readability
+    # Create word-by-word captions for better sync
     caption_index = 1
     with open(srt_path, "w", encoding="utf-8") as f:
         i = 0
@@ -405,8 +404,8 @@ def create_modern_srt(text: str, duration: float, task_id: str) -> str:
             start_str = format_srt_time(start_time)
             end_str = format_srt_time(end_time)
             
-            # Join words (uppercase for modern style)
-            caption_text = ' '.join(w['word'] for w in group).upper()
+            # Join words (keep natural case, not uppercase)
+            caption_text = ' '.join(w['word'] for w in group)
             
             f.write(f"{caption_index}\n")
             f.write(f"{start_str} --> {end_str}\n")
@@ -426,22 +425,22 @@ def format_srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
 def add_modern_captions_with_ffmpeg(video_path: str, srt_path: str, output_path: str):
-    """Add modern, TikTok-style captions with bold text and yellow highlight"""
+    """Add subtle, natural captions with word-by-word sync"""
     exe = ffmpeg.get_ffmpeg_exe()
     
     # Escape path for FFmpeg (Linux-compatible)
     abs_srt_path = str(Path(srt_path).resolve())
     srt_path_ffmpeg = abs_srt_path.replace('\\', '/').replace(':', '\\:')
     
-    # Modern caption style: Bold, yellow text, thick black outline
+    # Subtle caption style: Small white text, thin black outline, no background
     cmd = [
         exe, "-y", "-i", video_path,
         "-vf", (
             f"subtitles={srt_path_ffmpeg}:force_style='"
-            f"FontName=Arial Black,FontSize=40,Bold=1,"
-            f"PrimaryColour=&H00FFFF,OutlineColour=&H00000000,"  # Yellow text, black outline
-            f"BorderStyle=3,Outline=4,Shadow=2,"
-            f"Alignment=2,MarginV=100'"  # Bottom center, 100px from bottom
+            f"FontName=Arial,FontSize={CAPTION_FONT_SIZE},Bold=0,"
+            f"PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,"  # White text, black outline
+            f"BorderStyle=1,Outline=2,Shadow=0,"  # Thin outline, no shadow
+            f"BackColour=&H00000000,Alignment=2,MarginV=30'"  # No background, bottom center, 30px margin
         ),
         "-c:a", "copy",
         output_path
