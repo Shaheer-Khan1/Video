@@ -64,6 +64,13 @@ class VideoGenerationRequest(BaseModel):
     voice_id: Optional[str] = Field(default=None, description="ElevenLabs voice ID (optional)")
     callback_url: Optional[str] = Field(default=None, description="If provided, the server will POST the generated video to this URL when done.")
 
+# === CAPTION SETTINGS (Hardcoded) ===
+# Captions enabled for Linux/Render deployment
+# Note: May not work on Windows due to path escaping, but works perfectly on Linux
+# Memory impact: ~0MB (just text processing, no ML models)
+ADD_CAPTIONS = True  # Enabled for Render/Linux deployment
+CAPTION_FONT_SIZE = 28  # Font size for captions (16-48 recommended)
+
 class VideoGenerationResponse(BaseModel):
     task_id: str
     status: str
@@ -311,7 +318,81 @@ def merge_audio_video(video_path: str, audio_path: str, output_path: str):
         print(error_msg)
         raise Exception(error_msg)
 
-# Captions removed to save memory - Whisper alone uses 1-2GB RAM
+# === LIGHTWEIGHT CAPTIONING (No Whisper!) ===
+
+def create_srt_from_text(text: str, duration: float, task_id: str) -> str:
+    """Create SRT subtitle file by splitting text into chunks (no Whisper needed)"""
+    task_dir = TEMP_DIR / task_id
+    srt_path = task_dir / "captions.srt"
+    
+    # Split text into sentences or chunks
+    import re
+    # Split on sentence endings but keep punctuation
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    if not sentences or sentences == ['']:
+        # If no sentences, split into chunks of ~10 words
+        words = text.split()
+        chunk_size = 10
+        sentences = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    
+    # Calculate timing for each sentence
+    time_per_sentence = duration / len(sentences)
+    
+    with open(srt_path, "w", encoding="utf-8") as f:
+        for i, sentence in enumerate(sentences):
+            start_time = i * time_per_sentence
+            end_time = (i + 1) * time_per_sentence
+            
+            # Format: HH:MM:SS,mmm
+            start_str = format_srt_time(start_time)
+            end_str = format_srt_time(end_time)
+            
+            f.write(f"{i + 1}\n")
+            f.write(f"{start_str} --> {end_str}\n")
+            f.write(f"{sentence.strip()}\n\n")
+    
+    return str(srt_path)
+
+def format_srt_time(seconds: float) -> str:
+    """Format seconds to SRT time format: HH:MM:SS,mmm"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+def add_captions_with_ffmpeg(video_path: str, srt_path: str, output_path: str, font_size: int = 24):
+    """Add captions to video using FFmpeg's subtitles filter (very lightweight)"""
+    exe = ffmpeg.get_ffmpeg_exe()
+    
+    # For Windows, use absolute path with forward slashes and proper escaping
+    # The subtitles filter needs special handling on Windows
+    abs_srt_path = str(Path(srt_path).resolve())
+    
+    # On Windows, we need to escape the path properly for FFmpeg
+    # Replace backslashes with forward slashes
+    srt_path_ffmpeg = abs_srt_path.replace('\\', '/')
+    # Escape the colon in drive letter (C: becomes C\\:)
+    srt_path_ffmpeg = srt_path_ffmpeg.replace(':', '\\:')
+    
+    cmd = [
+        exe, "-y", "-i", video_path,
+        "-vf", (
+            f"subtitles={srt_path_ffmpeg}:force_style='"
+            f"FontName=Arial,FontSize={font_size},PrimaryColour=&H00FFFFFF,"
+            f"OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=1,"
+            f"Alignment=2,MarginV=80'"
+        ),
+        "-c:a", "copy",  # Copy audio (no re-encode)
+        output_path
+    ]
+    
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=180)
+    except subprocess.CalledProcessError as e:
+        error_msg = f"FFmpeg caption failed: {e.stderr}"
+        print(error_msg)
+        raise Exception(error_msg)
 
 async def process_video_generation(request: VideoGenerationRequest, task_id: str):
     """Main video processing pipeline - memory optimized"""
@@ -342,8 +423,21 @@ async def process_video_generation(request: VideoGenerationRequest, task_id: str
         
         # Step 5: Merge audio with video
         log_task(task_id, "Merging audio...")
-        final_output = OUTPUT_DIR / f"{task_id}_final.mp4"
-        merge_audio_video(compiled, audio_path, str(final_output))
+        task_dir = TEMP_DIR / task_id
+        merged_video = task_dir / "merged.mp4"
+        merge_audio_video(compiled, audio_path, str(merged_video))
+        
+        # Step 6: Add captions (hardcoded - always enabled, lightweight!)
+        if ADD_CAPTIONS:
+            log_task(task_id, "Adding captions...")
+            srt_path = create_srt_from_text(request.script_text, duration, task_id)
+            final_output = OUTPUT_DIR / f"{task_id}_final.mp4"
+            add_captions_with_ffmpeg(str(merged_video), srt_path, str(final_output), CAPTION_FONT_SIZE)
+            log_task(task_id, "Captions added")
+        else:
+            # No captions - use merged video as final
+            final_output = OUTPUT_DIR / f"{task_id}_final.mp4"
+            shutil.move(str(merged_video), str(final_output))
         
         # Update task
         tasks[task_id]['status'] = 'completed'
