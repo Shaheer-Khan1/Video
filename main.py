@@ -65,11 +65,12 @@ class VideoGenerationRequest(BaseModel):
     callback_url: Optional[str] = Field(default=None, description="If provided, the server will POST the generated video to this URL when done.")
 
 # === CAPTION SETTINGS (Hardcoded) ===
-# Captions enabled for Linux/Render deployment
-# Note: May not work on Windows due to path escaping, but works perfectly on Linux
+# Modern TikTok/Instagram Reels style captions
+# Word-by-word with better timing estimation (no Whisper needed!)
 # Memory impact: ~0MB (just text processing, no ML models)
 ADD_CAPTIONS = True  # Enabled for Render/Linux deployment
-CAPTION_FONT_SIZE = 28  # Font size for captions (16-48 recommended)
+CAPTION_STYLE = "modern"  # "modern" or "classic"
+WORDS_PER_CAPTION = 3  # Show 3 words at a time for better readability
 
 class VideoGenerationResponse(BaseModel):
     task_id: str
@@ -318,38 +319,101 @@ def merge_audio_video(video_path: str, audio_path: str, output_path: str):
         print(error_msg)
         raise Exception(error_msg)
 
-# === LIGHTWEIGHT CAPTIONING (No Whisper!) ===
+# === MODERN CAPTIONING SYSTEM (No Whisper!) ===
 
-def create_srt_from_text(text: str, duration: float, task_id: str) -> str:
-    """Create SRT subtitle file by splitting text into chunks (no Whisper needed)"""
+def estimate_word_timing(text: str, duration: float) -> list:
+    """
+    Estimate word-by-word timing based on word length and pauses.
+    More accurate than simple division - accounts for natural speech patterns.
+    """
+    words = text.split()
+    
+    # Estimate syllables per word (rough but effective)
+    def count_syllables(word):
+        word = word.lower().strip('.,!?;:')
+        vowels = 'aeiouy'
+        syllables = 0
+        previous_was_vowel = False
+        for char in word:
+            is_vowel = char in vowels
+            if is_vowel and not previous_was_vowel:
+                syllables += 1
+            previous_was_vowel = is_vowel
+        return max(1, syllables)
+    
+    # Calculate relative timing based on syllables
+    word_data = []
+    total_syllables = sum(count_syllables(w) for w in words)
+    
+    # Average speaking rate: ~2.5 syllables per second
+    # Add pauses for punctuation
+    current_time = 0.0
+    for word in words:
+        syllables = count_syllables(word)
+        # Base duration from syllables
+        word_duration = (syllables / total_syllables) * duration
+        
+        # Add pause for punctuation
+        if word.endswith(('.', '!', '?')):
+            word_duration += 0.3
+        elif word.endswith((',', ';', ':')):
+            word_duration += 0.15
+        
+        word_data.append({
+            'word': word.strip('.,!?;:'),
+            'start': current_time,
+            'end': current_time + word_duration
+        })
+        current_time += word_duration
+    
+    # Normalize to fit exact duration
+    if word_data:
+        scale = duration / current_time
+        for w in word_data:
+            w['start'] *= scale
+            w['end'] *= scale
+    
+    return word_data
+
+def create_modern_srt(text: str, duration: float, task_id: str) -> str:
+    """Create modern TikTok-style SRT with word groups for better readability"""
     task_dir = TEMP_DIR / task_id
     srt_path = task_dir / "captions.srt"
     
-    # Split text into sentences or chunks
-    import re
-    # Split on sentence endings but keep punctuation
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    if not sentences or sentences == ['']:
-        # If no sentences, split into chunks of ~10 words
-        words = text.split()
-        chunk_size = 10
-        sentences = [' '.join(words[i:i+chunk_size]) for i in range(0, len(words), chunk_size)]
+    # Get word-by-word timing
+    word_timings = estimate_word_timing(text, duration)
     
-    # Calculate timing for each sentence
-    time_per_sentence = duration / len(sentences)
+    if not word_timings:
+        return None
     
+    # Group words for better readability
+    caption_index = 1
     with open(srt_path, "w", encoding="utf-8") as f:
-        for i, sentence in enumerate(sentences):
-            start_time = i * time_per_sentence
-            end_time = (i + 1) * time_per_sentence
+        i = 0
+        while i < len(word_timings):
+            # Take WORDS_PER_CAPTION words at a time
+            group = word_timings[i:i+WORDS_PER_CAPTION]
             
-            # Format: HH:MM:SS,mmm
+            if not group:
+                break
+            
+            # Caption timing
+            start_time = group[0]['start']
+            end_time = group[-1]['end']
+            
+            # Format times
             start_str = format_srt_time(start_time)
             end_str = format_srt_time(end_time)
             
-            f.write(f"{i + 1}\n")
+            # Join words (uppercase for modern style)
+            caption_text = ' '.join(w['word'] for w in group).upper()
+            
+            f.write(f"{caption_index}\n")
             f.write(f"{start_str} --> {end_str}\n")
-            f.write(f"{sentence.strip()}\n\n")
+            f.write(f"{caption_text}\n\n")
+            
+            caption_index += 1
+            i += WORDS_PER_CAPTION
     
     return str(srt_path)
 
@@ -361,29 +425,25 @@ def format_srt_time(seconds: float) -> str:
     millis = int((seconds % 1) * 1000)
     return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
-def add_captions_with_ffmpeg(video_path: str, srt_path: str, output_path: str, font_size: int = 24):
-    """Add captions to video using FFmpeg's subtitles filter (very lightweight)"""
+def add_modern_captions_with_ffmpeg(video_path: str, srt_path: str, output_path: str):
+    """Add modern, TikTok-style captions with bold text and yellow highlight"""
     exe = ffmpeg.get_ffmpeg_exe()
     
-    # For Windows, use absolute path with forward slashes and proper escaping
-    # The subtitles filter needs special handling on Windows
+    # Escape path for FFmpeg (Linux-compatible)
     abs_srt_path = str(Path(srt_path).resolve())
+    srt_path_ffmpeg = abs_srt_path.replace('\\', '/').replace(':', '\\:')
     
-    # On Windows, we need to escape the path properly for FFmpeg
-    # Replace backslashes with forward slashes
-    srt_path_ffmpeg = abs_srt_path.replace('\\', '/')
-    # Escape the colon in drive letter (C: becomes C\\:)
-    srt_path_ffmpeg = srt_path_ffmpeg.replace(':', '\\:')
-    
+    # Modern caption style: Bold, yellow text, thick black outline
     cmd = [
         exe, "-y", "-i", video_path,
         "-vf", (
             f"subtitles={srt_path_ffmpeg}:force_style='"
-            f"FontName=Arial,FontSize={font_size},PrimaryColour=&H00FFFFFF,"
-            f"OutlineColour=&H00000000,BorderStyle=3,Outline=2,Shadow=1,"
-            f"Alignment=2,MarginV=80'"
+            f"FontName=Arial Black,FontSize=40,Bold=1,"
+            f"PrimaryColour=&H00FFFF,OutlineColour=&H00000000,"  # Yellow text, black outline
+            f"BorderStyle=3,Outline=4,Shadow=2,"
+            f"Alignment=2,MarginV=100'"  # Bottom center, 100px from bottom
         ),
-        "-c:a", "copy",  # Copy audio (no re-encode)
+        "-c:a", "copy",
         output_path
     ]
     
@@ -427,13 +487,13 @@ async def process_video_generation(request: VideoGenerationRequest, task_id: str
         merged_video = task_dir / "merged.mp4"
         merge_audio_video(compiled, audio_path, str(merged_video))
         
-        # Step 6: Add captions (hardcoded - always enabled, lightweight!)
+        # Step 6: Add modern captions (hardcoded - always enabled, lightweight!)
         if ADD_CAPTIONS:
-            log_task(task_id, "Adding captions...")
-            srt_path = create_srt_from_text(request.script_text, duration, task_id)
+            log_task(task_id, "Adding modern captions...")
+            srt_path = create_modern_srt(request.script_text, duration, task_id)
             final_output = OUTPUT_DIR / f"{task_id}_final.mp4"
-            add_captions_with_ffmpeg(str(merged_video), srt_path, str(final_output), CAPTION_FONT_SIZE)
-            log_task(task_id, "Captions added")
+            add_modern_captions_with_ffmpeg(str(merged_video), srt_path, str(final_output))
+            log_task(task_id, "Modern captions added")
         else:
             # No captions - use merged video as final
             final_output = OUTPUT_DIR / f"{task_id}_final.mp4"
